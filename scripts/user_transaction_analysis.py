@@ -1,95 +1,123 @@
 import sys
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum, count, avg, countDistinct, desc
-from pyspark.sql.types import TimestampType
 import logging
+from datetime import datetime
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum, count, avg, countDistinct, desc, lit
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, FloatType
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Dead-letter base path
+DEAD_LETTER_PATH = "s3://lab4-big-data-processing-with-emr/dead_letter/"
+
+# Explicit schemas
+users_schema = StructType([
+    StructField("user_id", StringType(), True),
+    StructField("first_name", StringType(), True),
+    StructField("last_name", StringType(), True),
+    StructField("email", StringType(), True),
+    StructField("phone_number", StringType(), True),
+    StructField("driver_license_number", StringType(), True),
+    StructField("driver_license_expiry", StringType(), True),
+    StructField("creation_date", StringType(), True),
+    StructField("is_active", IntegerType(), True)
+])
+
+rentals_schema = StructType([
+    StructField("rental_id", StringType(), True),
+    StructField("user_id", StringType(), True),
+    StructField("vehicle_id", StringType(), True),
+    StructField("rental_start_time", StringType(), True),
+    StructField("rental_end_time", StringType(), True),
+    StructField("pickup_location", IntegerType(), True),
+    StructField("dropoff_location", IntegerType(), True),
+    StructField("total_amount", FloatType(), True)
+])
+
 def create_spark_session():
-    """
-    Creates and configures a SparkSession with Hive support.
-    """
-    spark = SparkSession.builder \
-        .appName("UserTransactionAnalysis") \
-        .enableHiveSupport() \
-        .getOrCreate()
-    return spark
+    return SparkSession.builder.appName("UserTransactionAnalysis").enableHiveSupport().getOrCreate()
+
+def validate_columns(df, required_cols, name):
+    for c in required_cols:
+        if c not in df.columns:
+            raise ValueError(f"Missing column '{c}' in {name} dataset")
 
 def process_user_transaction_data(spark, raw_users_path, raw_rentals_path, output_path):
-    """
-    Processes user and rental transaction data to derive user behavior metrics.
-
-    Args:
-        spark (SparkSession): The SparkSession object.
-        raw_users_path (str): S3 path to the raw users dataset.
-        raw_rentals_path (str): S3 path to the raw rental transactions dataset.
-        output_path (str): S3 path to save the processed data.
-    """
-    logger.info(f"Starting processing for user and transaction analysis metrics.")
-    logger.info(f"Reading users from: {raw_users_path}")
-    logger.info(f"Reading rental transactions from: {raw_rentals_path}")
+    logger.info("Starting processing for user and transaction analysis metrics.")
 
     try:
-        # 1. Load DataFrames
-        df_users = spark.read.csv(raw_users_path, header=True, inferSchema=True)
-        df_rentals = spark.read.csv(raw_rentals_path, header=True, inferSchema=True)
+        # --- Execution date for partitioning and traceability ---
+        execution_date = datetime.utcnow().strftime("%Y-%m-%d")
 
-        logger.info("Raw DataFrames loaded successfully.")
-        logger.info(f"Users schema: {df_users.printSchema()}")
-        logger.info(f"Rentals schema: {df_rentals.printSchema()}")
+        # --- Header-only schema validation ---
+        users_header = spark.read.csv(raw_users_path, header=True, inferSchema=False, samplingRatio=0.0001)
+        rentals_header = spark.read.csv(raw_rentals_path, header=True, inferSchema=False, samplingRatio=0.0001)
 
-        # 2. Join Rental Transactions with Users
+        validate_columns(users_header, ["user_id", "first_name", "last_name", "email", "is_active", "creation_date"], "users")
+        validate_columns(rentals_header, ["rental_id", "user_id", "vehicle_id", "total_amount"], "rentals")
+
+        # --- Load datasets with defined schemas ---
+        df_users_raw = spark.read.schema(users_schema).csv(raw_users_path, header=True)
+        df_rentals_raw = spark.read.schema(rentals_schema).csv(raw_rentals_path, header=True)
+
+        # --- Drop malformed records and write to dead-letter ---
+        df_users = df_users_raw.dropna(subset=["user_id", "first_name", "last_name", "email", "creation_date"])
+        df_users_raw.subtract(df_users).write.mode("overwrite").csv(f"{DEAD_LETTER_PATH}/users", header=True)
+
+        df_rentals = df_rentals_raw.dropna(subset=["rental_id", "user_id", "vehicle_id", "total_amount"])
+        df_rentals_raw.subtract(df_rentals).write.mode("overwrite").csv(f"{DEAD_LETTER_PATH}/rentals", header=True)
+
+        logger.info("Data loaded and validated. Beginning join and aggregation.")
+
+        # --- Join Rentals with Users ---
         df_joined_users = df_rentals.join(
             df_users.select("user_id", "first_name", "last_name", "email", "is_active", "creation_date"),
             on="user_id",
             how="inner"
         )
-        logger.info("Joined rental transactions with users.")
 
-        # 3. Aggregate User Transaction Metrics
+        # --- User Transaction Summary ---
         user_transaction_summary = df_joined_users.groupBy(
             "user_id", "first_name", "last_name", "email", "is_active", "creation_date"
         ).agg(
             count("rental_id").alias("total_rental_transactions"),
             sum("total_amount").alias("total_spending"),
             avg("total_amount").alias("average_transaction_value")
-        )
-        logger.info("Aggregated user transaction metrics.")
+        ).withColumn("execution_date", lit(execution_date))
 
-        # 4. Overall Transaction Statistics
+        # --- Overall Statistics ---
         overall_transaction_stats = df_joined_users.agg(
             sum("total_amount").alias("overall_total_revenue"),
             avg("total_amount").alias("overall_avg_transaction_value"),
             count("rental_id").alias("overall_total_transactions"),
             countDistinct("user_id").alias("overall_total_unique_users"),
             countDistinct("vehicle_id").alias("overall_total_unique_vehicles_rented")
-        )
-        logger.info("Calculated overall transaction statistics.")
+        ).withColumn("execution_date", lit(execution_date))
 
-        # 5. Identify Top Users by Spending
+        # --- Top 100 Users ---
         top_users_by_spending = user_transaction_summary.orderBy(col("total_spending").desc()).limit(100)
-        logger.info("Identified top 100 users by spending.")
 
-        # 6. Write Results to S3 in Parquet format
-        output_user_summary_path = f"{output_path}/user_transaction_summary"
-        output_overall_stats_path = f"{output_path}/overall_transaction_statistics"
-        output_top_users_path = f"{output_path}/top_users_by_spending"
+        # --- Output Paths with Execution Date Partitioning ---
+        summary_out = f"{output_path}/user_transaction_summary/date={execution_date}"
+        stats_out = f"{output_path}/overall_transaction_statistics/date={execution_date}"
+        top_users_out = f"{output_path}/top_users_by_spending/date={execution_date}"
 
-        logger.info(f"Writing user transaction summary data to: {output_user_summary_path}")
-        user_transaction_summary.write.mode("overwrite").parquet(output_user_summary_path)
-        logger.info(f"Writing overall transaction statistics data to: {output_overall_stats_path}")
-        overall_transaction_stats.write.mode("overwrite").parquet(output_overall_stats_path)
-        logger.info(f"Writing top users by spending data to: {output_top_users_path}")
-        top_users_by_spending.write.mode("overwrite").parquet(output_top_users_path)
+        logger.info(f"Writing user transaction summary to: {summary_out}")
+        user_transaction_summary.write.mode("overwrite").parquet(summary_out)
 
-        logger.info("Processed data written to S3 successfully.")
+        logger.info(f"Writing overall stats to: {stats_out}")
+        overall_transaction_stats.write.mode("overwrite").parquet(stats_out)
+
+        logger.info(f"Writing top users to: {top_users_out}")
+        top_users_by_spending.write.mode("overwrite").parquet(top_users_out)
+
+        logger.info("User transaction data processed and written to S3 successfully.")
 
     except Exception as e:
         logger.error(f"Error during Spark job execution: {e}", exc_info=True)
-        sys.exit(1) # Exit with a non-zero code to indicate failure
+        sys.exit(1)
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
