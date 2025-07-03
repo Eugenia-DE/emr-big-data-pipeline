@@ -1,0 +1,415 @@
+{
+  "Comment": "Car Rental Serverless Data Pipeline",
+  "StartAt": "RunSparkJobs",
+  "States": {
+    "RunSparkJobs": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "RunVehicleLocationJob",
+          "States": {
+            "RunVehicleLocationJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+              "Parameters": {
+                "ApplicationId": "00ftgcai6ru5s60p",
+                "ExecutionRoleArn": "arn:aws:iam::371439860588:role/emr_serverless_exe_role",
+                "JobDriver": {
+                  "SparkSubmit": {
+                    "EntryPoint": "s3://lab4-big-data-processing-with-emr/scripts/vehicle_location_performance.py",
+                    "EntryPointArguments": [
+                      "s3://lab4-big-data-processing-with-emr/data/raw/vehicles/vehicles.csv",
+                      "s3://lab4-big-data-processing-with-emr/data/raw/locations/locations.csv",
+                      "s3://lab4-big-data-processing-with-emr/data/raw/rental_transactions/rental_transactions.csv",
+                      "s3://lab4-big-data-processing-with-emr/data/processed/vehicle_location_performance/"
+                    ],
+                    "SparkSubmitParameters": "--conf spark.driver.cores=2 --conf spark.driver.memory=4g --conf spark.executor.cores=2 --conf spark.executor.memory=4g"
+                  }
+                },
+                "ConfigurationOverrides": {
+                  "MonitoringConfiguration": {
+                    "S3MonitoringConfiguration": {
+                      "LogUri": "s3://lab4-big-data-processing-with-emr/emr-serverless-logs/"
+                    },
+                    "CloudWatchLoggingConfiguration": {
+                      "Enabled": true,
+                      "LogGroupName": "/aws/emr-serverless/jobs",
+                      "LogStreamNamePrefix": "vehicle-location-performance-job-sf"
+                    }
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyVehicleLocationJobFailure"
+                }
+              ],
+              "End": true
+            },
+            "NotifyVehicleLocationJobFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "arn:aws:sns:eu-west-1:371439860588:carrental-pipeline-alerts",
+                "Message": "Vehicle Location Spark job failed in Step Functions pipeline.",
+                "Subject": "Pipeline Alert: VehicleLocationJobFailed"
+              },
+              "Next": "FailVehicleLocationJob"
+            },
+            "FailVehicleLocationJob": {
+              "Type": "Fail",
+              "Error": "VehicleLocationJobFailed",
+              "Cause": "Vehicle Location Spark job failed."
+            }
+          }
+        },
+        {
+          "StartAt": "RunUserTransactionJob",
+          "States": {
+            "RunUserTransactionJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::emr-serverless:startJobRun.sync",
+              "Parameters": {
+                "ApplicationId": "00ftgcai6ru5s60p",
+                "ExecutionRoleArn": "arn:aws:iam::371439860588:role/emr_serverless_exe_role",
+                "JobDriver": {
+                  "SparkSubmit": {
+                    "EntryPoint": "s3://lab4-big-data-processing-with-emr/scripts/user_transaction_analysis.py",
+                    "EntryPointArguments": [
+                      "s3://lab4-big-data-processing-with-emr/data/raw/users/users.csv",
+                      "s3://lab4-big-data-processing-with-emr/data/raw/rental_transactions/rental_transactions.csv",
+                      "s3://lab4-big-data-processing-with-emr/data/processed/user_transaction_analysis/"
+                    ],
+                    "SparkSubmitParameters": "--conf spark.driver.cores=2 --conf spark.driver.memory=4g --conf spark.executor.cores=2 --conf spark.executor.memory=4g"
+                  }
+                },
+                "ConfigurationOverrides": {
+                  "MonitoringConfiguration": {
+                    "S3MonitoringConfiguration": {
+                      "LogUri": "s3://lab4-big-data-processing-with-emr/emr-serverless-logs/"
+                    },
+                    "CloudWatchLoggingConfiguration": {
+                      "Enabled": true,
+                      "LogGroupName": "/aws/emr-serverless/jobs",
+                      "LogStreamNamePrefix": "user-transaction-analysis-job-sf"
+                    }
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyUserTransactionJobFailure"
+                }
+              ],
+              "End": true
+            },
+            "NotifyUserTransactionJobFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "arn:aws:sns:eu-west-1:371439860588:carrental-pipeline-alerts",
+                "Message": "User Transaction Spark job failed in Step Functions pipeline.",
+                "Subject": "Pipeline Alert: UserTransactionJobFailed"
+              },
+              "Next": "FailUserTransactionJob"
+            },
+            "FailUserTransactionJob": {
+              "Type": "Fail",
+              "Error": "UserTransactionJobFailed",
+              "Cause": "User Transaction Spark job failed."
+            }
+          }
+        }
+      ],
+      "Next": "RunGlueCrawlers"
+    },
+    "RunGlueCrawlers": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "StartVehicleLocationCrawler",
+          "States": {
+            "StartVehicleLocationCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+              "Parameters": {
+                "Name": "car-rental-vehicle-location-crawler"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "FailVehicleLocationCrawler"
+                }
+              ],
+              "Next": "WaitVehicleLocationCrawler"
+            },
+            "WaitVehicleLocationCrawler": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "GetVehicleLocationCrawlerStatus"
+            },
+            "GetVehicleLocationCrawlerStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+              "Parameters": {
+                "Name": "car-rental-vehicle-location-crawler"
+              },
+              "ResultPath": "$.CrawlerStatus",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "FailVehicleLocationCrawler"
+                }
+              ],
+              "Next": "IsVehicleLocationCrawlerFinished"
+            },
+            "IsVehicleLocationCrawlerFinished": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.CrawlerStatus.Crawler.State",
+                  "StringEquals": "RUNNING",
+                  "Next": "WaitVehicleLocationCrawler"
+                },
+                {
+                  "Variable": "$.CrawlerStatus.Crawler.State",
+                  "StringEquals": "STOPPING",
+                  "Next": "WaitVehicleLocationCrawler"
+                }
+              ],
+              "Default": "VehicleLocationCrawlerSucceeded"
+            },
+            "VehicleLocationCrawlerSucceeded": {
+              "Type": "Succeed"
+            },
+            "FailVehicleLocationCrawler": {
+              "Type": "Fail",
+              "Error": "VehicleLocationCrawlerFailed",
+              "Cause": "Vehicle location crawler failed."
+            }
+          }
+        },
+        {
+          "StartAt": "StartUserTransactionCrawler",
+          "States": {
+            "StartUserTransactionCrawler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+              "Parameters": {
+                "Name": "car-rental-user-transaction-crawler"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "FailUserTransactionCrawler"
+                }
+              ],
+              "Next": "WaitUserTransactionCrawler"
+            },
+            "WaitUserTransactionCrawler": {
+              "Type": "Wait",
+              "Seconds": 10,
+              "Next": "GetUserTransactionCrawlerStatus"
+            },
+            "GetUserTransactionCrawlerStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+              "Parameters": {
+                "Name": "car-rental-user-transaction-crawler"
+              },
+              "ResultPath": "$.CrawlerStatus",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "FailUserTransactionCrawler"
+                }
+              ],
+              "Next": "IsUserTransactionCrawlerFinished"
+            },
+            "IsUserTransactionCrawlerFinished": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.CrawlerStatus.Crawler.State",
+                  "StringEquals": "RUNNING",
+                  "Next": "WaitUserTransactionCrawler"
+                },
+                {
+                  "Variable": "$.CrawlerStatus.Crawler.State",
+                  "StringEquals": "STOPPING",
+                  "Next": "WaitUserTransactionCrawler"
+                }
+              ],
+              "Default": "UserTransactionCrawlerSucceeded"
+            },
+            "UserTransactionCrawlerSucceeded": {
+              "Type": "Succeed"
+            },
+            "FailUserTransactionCrawler": {
+              "Type": "Fail",
+              "Error": "UserTransactionCrawlerFailed",
+              "Cause": "User transaction crawler failed."
+            }
+          }
+        }
+      ],
+      "Next": "RunAthenaQueries"
+    },
+    "RunAthenaQueries": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "RunVehicleLocationQuery",
+          "States": {
+            "RunVehicleLocationQuery": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+              "Parameters": {
+                "QueryString": "SELECT * FROM car_rental_db.overall_transaction_statistics LIMIT 10;",
+                "WorkGroup": "primary",
+                "ResultConfiguration": {
+                  "OutputLocation": "s3://lab4-big-data-processing-with-emr/athena-query-output/vehicle-location/"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "FailVehicleLocationQuery"
+                }
+              ],
+              "End": true
+            },
+            "FailVehicleLocationQuery": {
+              "Type": "Fail",
+              "Error": "VehicleLocationQueryFailed",
+              "Cause": "Athena query for vehicle location failed."
+            }
+          }
+        },
+        {
+          "StartAt": "RunUserTransactionQuery",
+          "States": {
+            "RunUserTransactionQuery": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+              "Parameters": {
+                "QueryString": "SELECT * FROM car_rental_db.user_transaction_summary LIMIT 10;",
+                "WorkGroup": "primary",
+                "ResultConfiguration": {
+                  "OutputLocation": "s3://lab4-big-data-processing-with-emr/athena-query-output/user-transaction/"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "FailUserTransactionQuery"
+                }
+              ],
+              "End": true
+            },
+            "FailUserTransactionQuery": {
+              "Type": "Fail",
+              "Error": "UserTransactionQueryFailed",
+              "Cause": "Athena query for user transaction failed."
+            }
+          }
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "NotifyFinalFailure"
+        }
+      ],
+      "Next": "PipelineSucceeded"
+    },
+    "NotifyFinalFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:eu-west-1:371439860588:carrental-pipeline-alerts",
+        "Message": "The Car Rental Data Pipeline failed during one of the final Athena query steps.",
+        "Subject": "Pipeline Alert: FinalFailure"
+      },
+      "Next": "FailFinalPipeline"
+    },
+    "FailFinalPipeline": {
+      "Type": "Fail",
+      "Error": "FinalPipelineFailed",
+      "Cause": "Final pipeline steps failed."
+    },
+    "PipelineSucceeded": {
+      "Type": "Succeed"
+    }
+  }
+}
